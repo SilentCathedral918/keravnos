@@ -1,0 +1,9 @@
+# VS Code IDE config
+.vscode/
+
+# binaries
+bin/
+
+# setup files
+*.bat
+*.sh
