@@ -1,0 +1,11 @@
+# Visual Studio Code
+.vscode
+
+# executables
+/bin
+
+# Batch files
+*.bat
+
+# Testbed
+/testbed
