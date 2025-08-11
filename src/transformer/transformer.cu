@@ -1,18 +1,23 @@
 #include "memory/memory.cuh"
 #include "utils/utils.cuh"
 #include "transformer/transformer.cuh"
+#include "neural_network/embedding.cuh"
 
 void transformer_allocate_memory(
   __half* &ptr, 
   const int batch_size, 
   const int sequence_length,
   const int vocab_size, 
-  const int num_dims
+  const int num_dims,
+  const int num_heads
 ) {
   const std::size_t required_ = 
-    sizeof(TransformerHeader)                   /* transformer header */    +
-    vocab_size * num_dims * sizeof(__half)      /* token embedding */       +
-    sequence_length * num_dims * sizeof(__half) /* positional embedding */
+    sizeof(TransformerHeader)                                                     /* transformer header */    +
+    vocab_size * num_dims * sizeof(__half)                                        /* token embedding */       +
+    sequence_length * num_dims * sizeof(__half)                                   /* positional embedding */  +
+    batch_size * sequence_length * sizeof(int)                                    /* token ids */             +    
+    batch_size * sequence_length * num_dims * sizeof(__half)                      /* input token vector */    +    
+    batch_size * num_heads * sequence_length * sequence_length * sizeof(__half)   /* dropout mask */
   ;
 
   py::print("[keravnos cuda] Allocating", required_, "bytes...");
@@ -20,12 +25,34 @@ void transformer_allocate_memory(
   if (!ptr) return;
 
   TransformerHeader staging_;
-  staging_._token_embed = reinterpret_cast<__half *>(reinterpret_cast<std::uintptr_t>(ptr) + sizeof(TransformerHeader));
-  staging_._pos_embed = reinterpret_cast<__half *>(reinterpret_cast<std::uintptr_t>(ptr) + sizeof(TransformerHeader) + (vocab_size * num_dims));
+  std::uintptr_t base_ = reinterpret_cast<std::uintptr_t>(ptr);
+  std::size_t offset_ = sizeof(TransformerHeader);
+  
+  offset_ = ALIGN_OFFSET(offset_, 256);
+  staging_._token_embed = reinterpret_cast<__half *>(base_ + offset_);
+  offset_ += vocab_size * num_dims * sizeof(__half);
+
+  offset_ = ALIGN_OFFSET(offset_, 256);
+  staging_._pos_embed = reinterpret_cast<__half *>(base_ + offset_);
+  offset_ += sequence_length * num_dims * sizeof(__half);
+
+  offset_ = ALIGN_OFFSET(offset_, 256);
+  staging_._token_ids = reinterpret_cast<int *>(base_ + offset_);
+  offset_ += batch_size * sequence_length * sizeof(int);
+  
+  offset_ = ALIGN_OFFSET(offset_, 256);
+  staging_._input_embed = reinterpret_cast<__half *>(base_ + offset_);
+  offset_ += batch_size * sequence_length * num_dims * sizeof(__half);
+  
+  offset_ = ALIGN_OFFSET(offset_, 256);
+  staging_._dropout = reinterpret_cast<__half *>(base_ + offset_);
+  offset_ += batch_size * num_heads * sequence_length * sequence_length * sizeof(__half);
+  
   staging_._batch_size = batch_size;
   staging_._sequence_length = sequence_length;
   staging_._vocab_size = vocab_size;
   staging_._num_dims = num_dims;
+  staging_._num_heads = num_heads;
   staging_._type_bytes = sizeof(__half);
   staging_._mem_total = required_;
   staging_._allocated = true;
@@ -39,9 +66,13 @@ void transformer_allocate_memory(
   py::print("Sequence Length      :", sequence_length);
   py::print("Vocab Size           :", vocab_size);
   py::print("Embedding Dim        :", num_dims);
+  py::print("Number of Heads      :", num_heads);
   py::print("Header Size          :", sizeof(TransformerHeader), "bytes");
   py::print("Token Embedding      :", vocab_size * num_dims * sizeof(__half), "bytes");
   py::print("Positional Embedding :", sequence_length * num_dims * sizeof(__half), "bytes");
+  py::print("Token IDs            :", batch_size * sequence_length * sizeof(int), "bytes");
+  py::print("Input Embedding      :", batch_size * sequence_length * num_dims * sizeof(__half), "bytes");
+  py::print("Dropout Mask         :", batch_size * num_heads * sequence_length * sequence_length * sizeof(__half), "bytes");
 }
 
 void transformer_deallocate_memory(__half* &ptr) {
@@ -52,19 +83,14 @@ void transformer_deallocate_memory(__half* &ptr) {
   py::print("[keravnos cuda] Transformer memory dellocated.");
 }
 
-void transformer_generate_embedding_weights(
-  __half* &ptr,
-  const int sequence_length,
-  const int vocab_size, 
-  const int num_dims
-) {
-  const int token_embed_limit_ = vocab_size * num_dims;
-
+void transformer_generate_embedding_weights(__half* &ptr) {
   TransformerHeader header_;
   cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
+  
+  const int token_embed_limit_ = header_._vocab_size * header_._num_dims;
 
-  utils_generate_random_half_dim2(header_._token_embed, vocab_size, num_dims, token_embed_limit_ * -1, token_embed_limit_);  
-  utils_generate_sinusoidal_half(header_._pos_embed, sequence_length, num_dims, 10000);
+  utils_generate_random_half_dim2(header_._token_embed, header_._vocab_size, header_._num_dims, token_embed_limit_ * -1, token_embed_limit_);  
+  utils_generate_sinusoidal_half(header_._pos_embed, header_._sequence_length, header_._num_dims, 10000);
 }
 
 void transformer_load_from_file(__half* &out, const char *filepath) {
@@ -177,3 +203,15 @@ py::array_t<float> transformer_positional_embedding(__half* &ptr) {
     vec_out_.data()
   );
 }
+
+void transformer_embed_input_tokens(__half* &ptr, const int *token_ids) {
+  TransformerHeader header_;
+  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
+  
+  // copy token ids to device
+  cudaMemcpy(header_._token_ids, token_ids, sizeof(int) * header_._batch_size * header_._sequence_length, cudaMemcpyHostToDevice);
+
+  // embed token ids to input embedding
+  embedding_input_vector(ptr);
+}
+

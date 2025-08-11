@@ -49,37 +49,44 @@ __global__ void _utils_generate_sinusoidal_half(__half *out, const int n, const 
 
 // ---------------------------------------- interface ---------------------------------------- //
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-extern "C" void utils_convert_float_to_half(__half *out, float *in, const int n, const int num_threads) {
+void utils_convert_float_to_half(__half *out, float *in, const int n, const int num_threads) {
   _utils_convert_float_to_half<<<(n + num_threads - 1) / num_threads, num_threads>>>(out, in, n);
 }
 
-extern "C" void utils_convert_half_to_float(float *out, __half *in, const int n, const int num_threads) {
+void utils_convert_half_to_float(float *out, __half *in, const int n, const int num_threads) {
   _utils_convert_half_to_float<<<(n + num_threads - 1) / num_threads, num_threads>>>(out, in, n);
 }
 
 
-extern "C" void utils_generate_random_half_dim1(__half *out, const int dx, const int min, const int max, const int num_threads) {
+void utils_generate_random_half_dim1(__half *out, const int dx, const int min, const int max, const int num_threads) {
   const int n_ = dx;
   std::uint64_t seed_ = static_cast<std::uint64_t>(std::random_device{}());
   _utils_generate_random_half<<<(n_ + num_threads - 1) / num_threads, num_threads>>>(out, n_, min, max, seed_);
 }
 
-extern "C" void utils_generate_random_half_dim2(__half *out, const int dx, const int dy, const int min, const int max, const int num_threads) {
+void utils_generate_random_half_dim2(__half *out, const int dx, const int dy, const int min, const int max, const int num_threads) {
   const int n_ = dx * dy;
   std::uint64_t seed_ = static_cast<std::uint64_t>(std::random_device{}());
   _utils_generate_random_half<<<(n_ + num_threads - 1) / num_threads, num_threads>>>(out, n_, min, max, seed_);
 }
 
-extern "C" void utils_generate_random_half_dim3(__half *out, const int dx, const int dy, const int dz, const int min, const int max, const int num_threads) {
+void utils_generate_random_half_dim3(__half *out, const int dx, const int dy, const int dz, const int min, const int max, const int num_threads) {
   const int n_ = dx * dy * dz;
   std::uint64_t seed_ = static_cast<std::uint64_t>(std::random_device{}());
   _utils_generate_random_half<<<(n_ + num_threads - 1) / num_threads, num_threads>>>(out, n_, min, max, seed_);
 }
 
 
-extern "C" void utils_generate_sinusoidal_half(__half *out, const int dx, const int dy, const int base, const int num_threads) {
+void utils_generate_sinusoidal_half(__half *out, const int dx, const int dy, const int base, const int num_threads) {
   const int n_ = dx * dy;
   _utils_generate_sinusoidal_half<<<(n_ + num_threads - 1) / num_threads, num_threads>>>(out, n_, dy, base);
 }
+
+#ifdef __cplusplus
+}
+#endif
 

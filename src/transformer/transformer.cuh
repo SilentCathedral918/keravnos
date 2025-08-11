@@ -3,11 +3,15 @@
 typedef struct TransformerHeader {
   __half*       _token_embed;
   __half*       _pos_embed;
+  int*          _token_ids;
+  __half*       _input_embed;
+  __half*       _dropout;
 
   std::uint32_t _batch_size;
   std::uint32_t _sequence_length;
   std::uint32_t _vocab_size;
   std::uint32_t _num_dims;
+  std::uint32_t _num_heads;
   std::uint32_t _type_bytes;
 
   bool          _allocated;
@@ -19,20 +23,19 @@ void transformer_allocate_memory(
   const int batch_size, 
   const int sequence_length, 
   const int vocab_size,
-  const int num_dims
+  const int num_dims,
+  const int num_heads
 );
 
 void transformer_deallocate_memory(__half* &ptr);
 
-void transformer_generate_embedding_weights(
-  __half* &ptr,
-  const int sequence_length,
-  const int vocab_size, 
-  const int num_dims
-);
+void transformer_generate_embedding_weights(__half* &ptr);
 
 void transformer_load_from_file(__half* &out, const char *filepath);
 void transformer_save_to_file(__half* &ptr, const char *filepath);
 
 py::array_t<float> transformer_token_embedding(__half* &ptr);
 py::array_t<float> transformer_positional_embedding(__half* &ptr);
+
+void transformer_embed_input_tokens(__half* &ptr, const int *token_ids);
+
