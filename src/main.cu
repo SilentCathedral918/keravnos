@@ -20,6 +20,26 @@ void keravnos_activate(int batch_size, int seq_len, int vocab_size, int n_dims, 
   transformer_generate_embedding_weights(transformer_weights);
   if (verbose) py::print("[keravnos] Transformer generated embedding weights.");
   
+  // generate QKV projection weights
+  transformer_generate_qkv_projection(transformer_weights);
+  if (verbose) py::print("[keravnos] Transformer generated QKV projection weights.");
+  
+  // generate QKV bias weights
+  transformer_generate_qkv_bias(transformer_weights);
+  if (verbose) py::print("[keravnos] Transformer generated QKV bias weights.");
+  
+  // generate output projection
+  transformer_generate_output_projection(transformer_weights);
+  if (verbose) py::print("[keravnos] Transformer generated output projection weights.");
+  
+  // generate output bias
+  transformer_generate_output_bias(transformer_weights);
+  if (verbose) py::print("[keravnos] Transformer generated output bias weights.");
+  
+  // reset weights
+  transformer_reset_weights(transformer_weights);
+  if (verbose) py::print("[keravnos] Transformer reset weights.");
+  
   if (verbose) py::print("[keravnos] Transformer activation completed.");
 }
 
@@ -101,6 +121,16 @@ void keravnos_embed_input_token_ids(py::array_t<int> token_ids, const bool verbo
   transformer_embed_input_tokens(transformer_weights, ids_);
 }
 
+void keravnos_causal_self_attention(const bool bias, const float dropout, const std::uint64_t seed, const bool verbose) {
+  if (transformer_weights == nullptr) {
+    if (verbose) py::print("[keravnos error] Transformer is not activated.");
+    return;
+  }
+
+  transformer_causal_self_attention(transformer_weights, bias, dropout, seed);
+  if (verbose) py::print("[keravnos] Transformer causal self-attention block completed.");
+}
+
 // ------------------------------ interface ------------------------------ //
 
 PYBIND11_MODULE(keravnos, m) {
@@ -145,6 +175,15 @@ PYBIND11_MODULE(keravnos, m) {
     "embed_input_token_ids",
     &keravnos_embed_input_token_ids,
     py::arg("token_ids"),
+    py::arg("verbose") = false
+  );
+
+  m.def(
+    "causal_self_attention",
+    &keravnos_causal_self_attention,
+    py::arg("bias") = true,
+    py::arg("dropout") = 0.5f,
+    py::arg("seed") = 0,
     py::arg("verbose") = false
   );
 }

@@ -1,3 +1,5 @@
+#pragma once
+
 #include "global.cuh"
 
 #ifdef __cplusplus

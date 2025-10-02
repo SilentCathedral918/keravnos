@@ -1,3 +1,5 @@
+#pragma once
+
 #include "global.cuh"
 
 template <typename T>

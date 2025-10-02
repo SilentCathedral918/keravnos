@@ -1,5 +1,15 @@
 #include "neural_network/dropout.cuh"
 
+__device__ __forceinline__ __half _dropout(const __half val, const float prob, curandStatePhilox4_32_10_t *state) {
+  return (curand_uniform(state) >= prob) 
+    ? __float2half(0.0f) 
+    : __hdiv(val, __float2half(prob));
+}
+
+__device__ __forceinline__ __half dropout_inline(const __half val, const float prob, curandStatePhilox4_32_10_t *state) {
+  return _dropout(val, prob, state);
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -18,12 +28,11 @@ __global__ void _dropout_mul_inplace(__half *out, const float factor, const int 
   curand_init(seed, idx_, 0, &state_);
 
   __half val_ = out[idx_];
-    if (curand_uniform(&state_) >= prob_) {
-        out[idx_] = __float2half(0.0f);
-    } else {
-        out[idx_] = __hdiv(__hmul(val_, __float2half(1.0f)), __float2half(prob_));
-    }
-
+  if (curand_uniform(&state_) >= prob_) {
+      out[idx_] = __float2half(0.0f);
+  } else {
+      out[idx_] = __hdiv(__hmul(val_, __float2half(1.0f)), __float2half(prob_));
+  }
 }
 
 void dropout_mul_inplace(__half *buf, const float factor, const int n, const std::uint64_t seed, const int num_threads) {
@@ -31,10 +40,17 @@ void dropout_mul_inplace(__half *buf, const float factor, const int n, const std
   _dropout_mul_inplace<<<(n + num_threads - 1) / num_threads, num_threads>>>(buf, factor, n, seed_);
 }
 
+__global__ void dropout_apply_kernel(__half *buf, const float prob, const int n, const std::uint64_t seed) {
+  int idx_ = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx_ >= n) return;
+
+  curandStatePhilox4_32_10_t state_;
+  curand_init(seed, idx_, 0, &state_);
+
+  buf[idx_] = _dropout(buf[idx_], prob, &state_);
+}
+
 #ifdef __cplusplus
 }
 #endif
-
-
-
 

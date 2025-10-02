@@ -2,6 +2,7 @@
 #include "utils/utils.cuh"
 #include "transformer/transformer.cuh"
 #include "neural_network/embedding.cuh"
+#include "blocks/causal_self_attention.cuh"
 
 void transformer_allocate_memory(
   __half* &ptr, 
@@ -11,13 +12,26 @@ void transformer_allocate_memory(
   const int num_dims,
   const int num_heads
 ) {
+  if (num_dims % num_heads != 0) {
+    py::print("[keravnos error] Number of dimensions must be divisible by number of heads.");
+    return;
+  }
+
   const std::size_t required_ = 
-    sizeof(TransformerHeader)                                                     /* transformer header */    +
-    vocab_size * num_dims * sizeof(__half)                                        /* token embedding */       +
-    sequence_length * num_dims * sizeof(__half)                                   /* positional embedding */  +
-    batch_size * sequence_length * sizeof(int)                                    /* token ids */             +    
-    batch_size * sequence_length * num_dims * sizeof(__half)                      /* input token vector */    +    
-    batch_size * num_heads * sequence_length * sequence_length * sizeof(__half)   /* dropout mask */
+    sizeof(TransformerHeader)                                                           /* transformer header */      +
+    vocab_size * num_dims * sizeof(__half)                                              /* token embedding */         +
+    sequence_length * num_dims * sizeof(__half)                                         /* positional embedding */    +
+    batch_size * sequence_length * sizeof(int)                                          /* token ids */               +    
+    batch_size * sequence_length * num_dims * sizeof(__half)                            /* input token vector */      +    
+    batch_size * num_heads * sequence_length * sequence_length * sizeof(__half)         /* dropout mask */            +
+    num_dims * (3 * num_dims) * sizeof(__half)                                          /* QKV projection weights */  +
+    batch_size * sequence_length * (3 * num_dims) * sizeof(__half)                      /* QKV matrix */              +
+    (3 * num_dims) * sizeof(__half)                                                     /* QKV bias */                +
+    batch_size * num_heads * sequence_length * sequence_length * sizeof(__half)         /* attention scores */        +
+    batch_size * num_heads * sequence_length * (num_dims / num_heads) * sizeof(__half)  /* context layer */           +
+    num_dims * num_dims * sizeof(__half)                                                /* out projection */          +
+    num_dims * sizeof(__half)                                                           /* out projection bias */     +
+    batch_size * sequence_length * num_dims * sizeof(__half)                            /* output */
   ;
 
   py::print("[keravnos cuda] Allocating", required_, "bytes...");
@@ -48,6 +62,38 @@ void transformer_allocate_memory(
   staging_._dropout = reinterpret_cast<__half *>(base_ + offset_);
   offset_ += batch_size * num_heads * sequence_length * sequence_length * sizeof(__half);
   
+  offset_ = ALIGN_OFFSET(offset_, 256);
+  staging_._qkv_proj = reinterpret_cast<__half *>(base_ + offset_);
+  offset_ += num_dims * (3 * num_dims) * sizeof(__half);
+  
+  offset_ = ALIGN_OFFSET(offset_, 256);
+  staging_._qkv_matrix = reinterpret_cast<__half *>(base_ + offset_);
+  offset_ += batch_size * sequence_length * (3 * num_dims) * sizeof(__half);
+
+  offset_ = ALIGN_OFFSET(offset_, 256);
+  staging_._qkv_bias = reinterpret_cast<__half *>(base_ + offset_);
+  offset_ += (3 * num_dims) * sizeof(__half);
+
+  offset_ = ALIGN_OFFSET(offset_, 256);
+  staging_._attn_scores = reinterpret_cast<__half *>(base_ + offset_);
+  offset_ += batch_size * num_heads * sequence_length * sequence_length * sizeof(__half);
+
+  offset_ = ALIGN_OFFSET(offset_, 256);
+  staging_._context_layer = reinterpret_cast<__half *>(base_ + offset_);
+  offset_ += batch_size * num_heads * sequence_length * (num_dims / num_heads) * sizeof(__half);
+
+  offset_ = ALIGN_OFFSET(offset_, 256);
+  staging_._out_proj = reinterpret_cast<__half *>(base_ + offset_);
+  offset_ += num_dims * num_dims * sizeof(__half);
+
+  offset_ = ALIGN_OFFSET(offset_, 256);
+  staging_._out_proj_bias = reinterpret_cast<__half *>(base_ + offset_);
+  offset_ += num_dims * sizeof(__half);
+
+  offset_ = ALIGN_OFFSET(offset_, 256);
+  staging_._output = reinterpret_cast<__half *>(base_ + offset_);
+  offset_ += batch_size * sequence_length * num_dims * sizeof(__half);
+
   staging_._batch_size = batch_size;
   staging_._sequence_length = sequence_length;
   staging_._vocab_size = vocab_size;
@@ -213,5 +259,138 @@ void transformer_embed_input_tokens(__half* &ptr, const int *token_ids) {
 
   // embed token ids to input embedding
   embedding_input_vector(ptr);
+}
+
+void transformer_generate_qkv_projection(__half* &ptr) {
+  TransformerHeader header_;
+  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
+  
+  const int n_dims_ = header_._num_dims;
+  const int qkv_size_ = n_dims_ * (3 * n_dims_);
+  
+  utils_generate_random_half_dim2(header_._qkv_proj, n_dims_, n_dims_ * 3, -qkv_size_, qkv_size_);
+}
+
+void transformer_generate_qkv_bias(__half* &ptr) {
+  TransformerHeader header_;
+  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
+
+  const int bias_dim_ = 3 * header_._num_dims;
+  utils_generate_random_half_dim1(
+    header_._qkv_bias, 
+    bias_dim_, 
+    -bias_dim_, bias_dim_
+  );
+}
+
+void transformer_generate_output_projection(__half* &ptr) {
+  TransformerHeader header_;
+  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
+
+  const int n_dims_ = header_._num_dims;
+  const int out_proj_size_ = n_dims_ * n_dims_;
+
+  utils_generate_random_half_dim2(
+    header_._out_proj,
+    n_dims_, n_dims_,
+    -out_proj_size_, out_proj_size_
+  );
+}
+
+void transformer_generate_output_bias(__half* &ptr) {
+  TransformerHeader header_;
+  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
+
+  const int n_dims_ = header_._num_dims;
+  utils_generate_random_half_dim1(
+    header_._out_proj_bias,
+    n_dims_,
+    -n_dims_, n_dims_
+  );
+}
+
+void transformer_reset_weights(__half* &ptr) {
+  TransformerHeader header_;
+  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
+
+  // QKV bias
+  cudaMemset(header_._qkv_bias, 0, 3 * header_._num_dims * sizeof(__half));
+
+  // output weights
+  cudaMemset(
+    header_._output, 
+    0, 
+    header_._batch_size * header_._sequence_length * header_._num_dims * sizeof(__half)
+  );
+}
+
+void transformer_causal_self_attention(__half* &ptr, const bool bias, const float dropout, const std::uint64_t seed) {
+  TransformerHeader header_;
+  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
+  
+  const int batch_size_ = header_._batch_size;
+  const int seq_len_ = header_._sequence_length;
+  const int n_dims_ = header_._num_dims;
+  const int n_heads_ = header_._num_heads;
+  const int head_dim_ = n_dims_ / n_heads_;
+  const int qkv_stride_ = batch_size_ * seq_len_ * n_dims_;
+  const __half *q_matrix_ = header_._qkv_matrix;
+  const __half *k_matrix_ = q_matrix_ + qkv_stride_;
+  const __half *v_matrix_ = k_matrix_ + qkv_stride_;
+
+  cublasHandle_t handle_;
+  cublasStatus_t stat_ = cublasCreate(&handle_);
+  if (stat_ != CUBLAS_STATUS_SUCCESS) {
+		py::print("\n[keravnos cuda error] Failed to create CUBLAS.");
+		return;
+	}
+
+  // QKV projection
+  selfattn_qkv_projection(
+    header_._qkv_matrix, 
+    handle_, 
+    header_._input_embed, 
+    header_._qkv_proj, header_._qkv_bias,
+    n_dims_, batch_size_, seq_len_, 
+    bias
+  );
+
+  // attention score
+  dim3 grid_attn_(seq_len_, seq_len_, batch_size_ * n_heads_);
+  selfattn_attention_scores<<<grid_attn_, 1>>>(
+    header_._attn_scores,
+    q_matrix_, k_matrix_,
+    seq_len_, n_heads_, head_dim_, sqrtf(static_cast<float>(head_dim_)),
+    true
+  );
+
+  // softmax + dropout
+  dim3 grid_softmax_(seq_len_, batch_size_ * n_heads_);
+  selfattn_softmax_dropout<<<grid_softmax_, seq_len_>>>(
+    header_._attn_scores,
+    seq_len_, n_heads_, dropout, seed
+  );
+
+  // weighted sum of values
+  dim3 grid_wv_(seq_len_, batch_size_ * n_heads_);
+  selfattn_attention_weighted_values<<<grid_wv_, head_dim_>>>(
+    header_._context_layer, header_._attn_scores, v_matrix_,
+    seq_len_, n_heads_, head_dim_
+  );
+
+  // final projection
+  selfattn_output_projection(
+    header_._output,
+    handle_,
+    header_._context_layer, header_._out_proj, header_._out_proj_bias,
+    batch_size_, seq_len_, n_dims_, head_dim_, n_heads_,
+    bias
+  );
+
+  stat_ = cublasDestroy(handle_);
+  if (stat_ != CUBLAS_STATUS_SUCCESS) {
+		py::print("\n[keravnos cuda error] Failed to destroy CUBLAS.");
+		return;
+	}
 }
 
