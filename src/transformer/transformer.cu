@@ -1,396 +1,733 @@
 #include "memory/memory.cuh"
-#include "utils/utils.cuh"
-#include "transformer/transformer.cuh"
+#include "utils/device.cuh"
 #include "neural_network/embedding.cuh"
-#include "blocks/causal_self_attention.cuh"
+#include "blocks/self_attention.cuh"
+#include "transformer/transformer.cuh"
 
-void transformer_allocate_memory(
-  __half* &ptr, 
+
+void transformer_allocate_device_memory(
+  Transformer *transformer,
   const int batch_size, 
-  const int sequence_length,
-  const int vocab_size, 
+  const int sequence_length, 
+  const int vocab_size,
   const int num_dims,
-  const int num_heads
+  const int num_heads,
+  const bool verbose
 ) {
-  if (num_dims % num_heads != 0) {
-    py::print("[keravnos error] Number of dimensions must be divisible by number of heads.");
-    return;
-  }
+    if (num_dims % num_heads != 0) {
+        if (verbose) KERAVNOS_PRINT_ERROR("num_dims of ", num_dims, " is not divisible by num_heads of ", num_heads);
+        return;
+    }
 
-  const std::size_t required_ = 
-    sizeof(TransformerHeader)                                                           /* transformer header */      +
-    vocab_size * num_dims * sizeof(__half)                                              /* token embedding */         +
-    sequence_length * num_dims * sizeof(__half)                                         /* positional embedding */    +
-    batch_size * sequence_length * sizeof(int)                                          /* token ids */               +    
-    batch_size * sequence_length * num_dims * sizeof(__half)                            /* input token vector */      +    
-    batch_size * num_heads * sequence_length * sequence_length * sizeof(__half)         /* dropout mask */            +
-    num_dims * (3 * num_dims) * sizeof(__half)                                          /* QKV projection weights */  +
-    batch_size * sequence_length * (3 * num_dims) * sizeof(__half)                      /* QKV matrix */              +
-    (3 * num_dims) * sizeof(__half)                                                     /* QKV bias */                +
-    batch_size * num_heads * sequence_length * sequence_length * sizeof(__half)         /* attention scores */        +
-    batch_size * num_heads * sequence_length * (num_dims / num_heads) * sizeof(__half)  /* context layer */           +
-    num_dims * num_dims * sizeof(__half)                                                /* out projection */          +
-    num_dims * sizeof(__half)                                                           /* out projection bias */     +
-    batch_size * sequence_length * num_dims * sizeof(__half)                            /* output */
-  ;
-
-  py::print("[keravnos cuda] Allocating", required_, "bytes...");
-  memory_allocate(ptr, required_);
-  if (!ptr) return;
-
-  TransformerHeader staging_;
-  std::uintptr_t base_ = reinterpret_cast<std::uintptr_t>(ptr);
-  std::size_t offset_ = sizeof(TransformerHeader);
-  
-  offset_ = ALIGN_OFFSET(offset_, 256);
-  staging_._token_embed = reinterpret_cast<__half *>(base_ + offset_);
-  offset_ += vocab_size * num_dims * sizeof(__half);
-
-  offset_ = ALIGN_OFFSET(offset_, 256);
-  staging_._pos_embed = reinterpret_cast<__half *>(base_ + offset_);
-  offset_ += sequence_length * num_dims * sizeof(__half);
-
-  offset_ = ALIGN_OFFSET(offset_, 256);
-  staging_._token_ids = reinterpret_cast<int *>(base_ + offset_);
-  offset_ += batch_size * sequence_length * sizeof(int);
-  
-  offset_ = ALIGN_OFFSET(offset_, 256);
-  staging_._input_embed = reinterpret_cast<__half *>(base_ + offset_);
-  offset_ += batch_size * sequence_length * num_dims * sizeof(__half);
-  
-  offset_ = ALIGN_OFFSET(offset_, 256);
-  staging_._dropout = reinterpret_cast<__half *>(base_ + offset_);
-  offset_ += batch_size * num_heads * sequence_length * sequence_length * sizeof(__half);
-  
-  offset_ = ALIGN_OFFSET(offset_, 256);
-  staging_._qkv_proj = reinterpret_cast<__half *>(base_ + offset_);
-  offset_ += num_dims * (3 * num_dims) * sizeof(__half);
-  
-  offset_ = ALIGN_OFFSET(offset_, 256);
-  staging_._qkv_matrix = reinterpret_cast<__half *>(base_ + offset_);
-  offset_ += batch_size * sequence_length * (3 * num_dims) * sizeof(__half);
-
-  offset_ = ALIGN_OFFSET(offset_, 256);
-  staging_._qkv_bias = reinterpret_cast<__half *>(base_ + offset_);
-  offset_ += (3 * num_dims) * sizeof(__half);
-
-  offset_ = ALIGN_OFFSET(offset_, 256);
-  staging_._attn_scores = reinterpret_cast<__half *>(base_ + offset_);
-  offset_ += batch_size * num_heads * sequence_length * sequence_length * sizeof(__half);
-
-  offset_ = ALIGN_OFFSET(offset_, 256);
-  staging_._context_layer = reinterpret_cast<__half *>(base_ + offset_);
-  offset_ += batch_size * num_heads * sequence_length * (num_dims / num_heads) * sizeof(__half);
-
-  offset_ = ALIGN_OFFSET(offset_, 256);
-  staging_._out_proj = reinterpret_cast<__half *>(base_ + offset_);
-  offset_ += num_dims * num_dims * sizeof(__half);
-
-  offset_ = ALIGN_OFFSET(offset_, 256);
-  staging_._out_proj_bias = reinterpret_cast<__half *>(base_ + offset_);
-  offset_ += num_dims * sizeof(__half);
-
-  offset_ = ALIGN_OFFSET(offset_, 256);
-  staging_._output = reinterpret_cast<__half *>(base_ + offset_);
-  offset_ += batch_size * sequence_length * num_dims * sizeof(__half);
-
-  staging_._batch_size = batch_size;
-  staging_._sequence_length = sequence_length;
-  staging_._vocab_size = vocab_size;
-  staging_._num_dims = num_dims;
-  staging_._num_heads = num_heads;
-  staging_._type_bytes = sizeof(__half);
-  staging_._mem_total = required_;
-  staging_._allocated = true;
-  
-  cudaMemcpy(ptr, &staging_, sizeof(TransformerHeader), cudaMemcpyHostToDevice);
-
-  py::print("\n[keravnos cuda] Transformer Memory Allocated");
-  py::print("-----------------------------------");
-  py::print("Total Bytes          :", required_, "bytes");
-  py::print("Batch Size           :", batch_size);
-  py::print("Sequence Length      :", sequence_length);
-  py::print("Vocab Size           :", vocab_size);
-  py::print("Embedding Dim        :", num_dims);
-  py::print("Number of Heads      :", num_heads);
-  py::print("Header Size          :", sizeof(TransformerHeader), "bytes");
-  py::print("Token Embedding      :", vocab_size * num_dims * sizeof(__half), "bytes");
-  py::print("Positional Embedding :", sequence_length * num_dims * sizeof(__half), "bytes");
-  py::print("Token IDs            :", batch_size * sequence_length * sizeof(int), "bytes");
-  py::print("Input Embedding      :", batch_size * sequence_length * num_dims * sizeof(__half), "bytes");
-  py::print("Dropout Mask         :", batch_size * num_heads * sequence_length * sequence_length * sizeof(__half), "bytes");
-}
-
-void transformer_deallocate_memory(__half* &ptr) {
-  TransformerHeader header_;
-  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
-  
-  memory_deallocate(ptr);
-  py::print("[keravnos cuda] Transformer memory dellocated.");
-}
-
-void transformer_generate_embedding_weights(__half* &ptr) {
-  TransformerHeader header_;
-  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
-  
-  const int token_embed_limit_ = header_._vocab_size * header_._num_dims;
-
-  utils_generate_random_half_dim2(header_._token_embed, header_._vocab_size, header_._num_dims, token_embed_limit_ * -1, token_embed_limit_);  
-  utils_generate_sinusoidal_half(header_._pos_embed, header_._sequence_length, header_._num_dims, 10000);
-}
-
-void transformer_load_from_file(__half* &out, const char *filepath) {
-  std::ifstream in_(filepath, std::ios::binary | std::ios::ate);
-  if (!in_.is_open()) {
-    py::print("[keravnos cuda error] Failed to open file:", filepath);
-    return;
-  }
-  
-  std::streamsize size_ = in_.tellg();
-  in_.seekg(0, std::ios::beg);
-
-  std::vector<char> vec_data_(size_);
-  in_.read(vec_data_.data(), size_);
-  in_.close();
-
-  TransformerHeader* header_ = reinterpret_cast<TransformerHeader*>(vec_data_.data());
-  
-  py::print("[keravnos cuda] Allocating", header_->_mem_total, "bytes...");
-  memory_allocate(out, header_->_mem_total);
-  if (!out) return;
-  
-  cudaMemcpy(out, vec_data_.data(), header_->_mem_total, cudaMemcpyHostToDevice);
-  py::print("\n[keravnos cuda] Transformer Memory Allocated");
-  py::print("-----------------------------------");
-  py::print("Total Bytes          :", header_->_mem_total, "bytes");
-  py::print("Batch Size           :", header_->_batch_size);
-  py::print("Sequence Length      :", header_->_sequence_length);
-  py::print("Vocab Size           :", header_->_vocab_size);
-  py::print("Embedding Dim        :", header_->_num_dims);
-  py::print("Header Size          :", sizeof(TransformerHeader), "bytes");
-  py::print("Token Embedding      :", header_->_vocab_size * header_->_num_dims * sizeof(__half), "bytes");
-  py::print("Positional Embedding :", header_->_sequence_length * header_->_num_dims * sizeof(__half), "bytes");
-}
-
-void transformer_save_to_file(__half* &ptr, const char *filepath) {
-  TransformerHeader header_;
-  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
-  
-  std::vector<char> vec_data_(header_._mem_total);
-  cudaMemcpy(vec_data_.data(), ptr, header_._mem_total, cudaMemcpyDeviceToHost);
-
-  std::ofstream out_(filepath, std::ios::binary);
-  out_.write(vec_data_.data(), vec_data_.size());
-
-  py::print("[keravnos cuda] Transformer weights saved to filepath:", filepath);
-  out_.close();
-}
-
-py::array_t<float> transformer_token_embedding(__half* &ptr) {
-  TransformerHeader header_;
-  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
-
-  std::size_t num_elems_ = header_._vocab_size * header_._num_dims;
-  std::vector<float> vec_out_(num_elems_);
-  std::size_t mem_free_ = memory_get_gpu_vram()["Device 0 _ VRAM Free (bytes)"];
-  std::size_t mem_required_ = sizeof(float) * num_elems_;
-  std::size_t mem_padding_ = 32 * 1024 * 1024; // 32 MB padding
-
-  if (mem_free_ >= mem_required_ + mem_padding_) {
-    float *arr_out_ = nullptr;
-    memory_allocate(arr_out_, sizeof(float) * num_elems_);
-    utils_convert_half_to_float(arr_out_, header_._token_embed, num_elems_);
-    cudaMemcpy(vec_out_.data(), arr_out_, sizeof(float) * num_elems_, cudaMemcpyDeviceToHost);
-    memory_deallocate(arr_out_);
-  }  
-  else {
-    std::vector<__half> vec_half_(num_elems_);
-    cudaMemcpy(vec_half_.data(), header_._token_embed, sizeof(__half) * num_elems_, cudaMemcpyDeviceToHost);
+    TransformerHeader staging_header_ = {};
     
-    for (std::size_t i = 0; i < num_elems_; ++i)
-      vec_out_[i] = __half2float(vec_half_[i]);
-  }
-
-  return py::array_t<float>(
-    {header_._vocab_size, header_._num_dims},
-    {sizeof(float) * header_._num_dims, sizeof(float)},
-    vec_out_.data()
-  );
-}
-
-py::array_t<float> transformer_positional_embedding(__half* &ptr) {
-  TransformerHeader header_;
-  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
-
-  std::size_t num_elems_ = header_._sequence_length * header_._num_dims;
-  std::vector<float> vec_out_(num_elems_);
-  std::size_t mem_free_ = memory_get_gpu_vram()["Device 0 _ VRAM Free (bytes)"];
-  std::size_t mem_required_ = sizeof(float) * num_elems_;
-  std::size_t mem_padding_ = 32 * 1024 * 1024; // 32 MB padding
-
-  if (mem_free_ >= mem_required_ + mem_padding_) {
-    float *arr_out_ = nullptr;
-    memory_allocate(arr_out_, sizeof(float) * num_elems_);
-    utils_convert_half_to_float(arr_out_, header_._pos_embed, num_elems_);
-    cudaMemcpy(vec_out_.data(), arr_out_, sizeof(float) * num_elems_, cudaMemcpyDeviceToHost);
-    memory_deallocate(arr_out_);
-  }  
-  else {
-    std::vector<__half> vec_half_(num_elems_);
-    cudaMemcpy(vec_half_.data(), header_._pos_embed, sizeof(__half) * num_elems_, cudaMemcpyDeviceToHost);
+    staging_header_._batch_size = batch_size;
+    staging_header_._sequence_length = sequence_length;
+    staging_header_._vocab_size = vocab_size;
+    staging_header_._num_dims = num_dims;
+    staging_header_._num_heads = num_heads;
+    staging_header_._type_bytes = sizeof(__half);
     
-    for (std::size_t i = 0; i < num_elems_; ++i)
-      vec_out_[i] = __half2float(vec_half_[i]);
-  }
+    std::size_t offset_ = sizeof(TransformerHeader);
 
-  return py::array_t<float>(
-    {header_._sequence_length, header_._num_dims},
-    {sizeof(float) * header_._num_dims, sizeof(float)},
-    vec_out_.data()
-  );
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._offset_token_embed = offset_;
+    offset_ += vocab_size * num_dims * sizeof(__half);
+    
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._offset_pos_embed = offset_;
+    offset_ += sequence_length * num_dims * sizeof(__half);
+    
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._offset_token_ids = offset_;
+    offset_ += batch_size * sequence_length * sizeof(int);
+    
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._offset_input_embed = offset_;
+    offset_ += batch_size * sequence_length * num_dims * sizeof(__half);
+    
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._offset_dropout = offset_;
+    offset_ += batch_size * num_heads * sequence_length * sequence_length * sizeof(__half);
+    
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._offset_qkv_proj = offset_;
+    offset_ += num_dims * (num_dims * 3) * sizeof(__half);
+    
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._offset_qkv_matrix = offset_;
+    offset_ += batch_size * sequence_length * (num_dims * 3) * sizeof(__half);
+    
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._offset_qkv_proj_bias = offset_;
+    offset_ += (num_dims * 3) * sizeof(__half);
+    
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._offset_attn_scores = offset_;
+    offset_ += batch_size * num_heads * sequence_length * sequence_length * sizeof(__half);
+    
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._offset_context_layer = offset_;
+    offset_ += batch_size * num_heads * sequence_length * (num_dims / num_heads) * sizeof(__half);
+    
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._offset_out_proj = offset_;
+    offset_ += num_dims * num_dims * sizeof(__half);
+    
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._offset_out_proj_bias = offset_;
+    offset_ += num_dims * sizeof(__half);
+    
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._offset_output = offset_;
+    offset_ += batch_size * sequence_length * num_dims * sizeof(__half);
+
+    offset_ = ALIGN_OFFSET(offset_, 256);
+    staging_header_._mem_total = offset_;
+    staging_header_._allocated = true;
+
+    if (verbose) KERAVNOS_PRINT("allocating ", staging_header_._mem_total, " bytes...");
+    transformer->_dvc_base = static_cast<__half *>(memory_device_allocate(staging_header_._mem_total, verbose));
+    memory_copy_host_to_device(transformer->_dvc_base, &staging_header_, sizeof(TransformerHeader), verbose);
+
+    if (verbose) {
+        KERAVNOS_PRINT("transformer allocated device memory.");
+        PY_PRINT("------------------------");
+        PY_PRINT("Total Bytes            : ", staging_header_._mem_total, " bytes");
+        PY_PRINT("Batch Size             : ", batch_size);
+        PY_PRINT("Sequence Length        : ", sequence_length);
+        PY_PRINT("Vocab Size             : ", vocab_size);
+        PY_PRINT("Embedding Dim          : ", num_dims);
+        PY_PRINT("Number of Heads        : ", num_heads);
+        PY_PRINT("Header Size            : ", sizeof(TransformerHeader), " bytes");
+        PY_PRINT("Token Embedding        : ", vocab_size * num_dims * sizeof(__half), " bytes");
+        PY_PRINT("Positional Embedding   : ", sequence_length * num_dims * sizeof(__half), " bytes");
+        PY_PRINT("Token IDs              : ", batch_size * sequence_length * sizeof(int), " bytes");
+        PY_PRINT("Input Embedding        : ", batch_size * sequence_length * num_dims * sizeof(__half), " bytes");
+        PY_PRINT("Dropout Mask           : ", batch_size * num_heads * sequence_length * sequence_length * sizeof(__half), " bytes");
+        PY_PRINT("QKV Projection         : ", num_dims * (num_dims * 3) * sizeof(__half), " bytes");
+        PY_PRINT("QKV Matrix             : ", batch_size * sequence_length * (num_dims * 3) * sizeof(__half), " bytes");
+        PY_PRINT("QKV Bias               : ", (num_dims * 3) * sizeof(__half), " bytes");
+        PY_PRINT("Attention Scores       : ", batch_size * num_heads * sequence_length * sequence_length * sizeof(__half), " bytes");
+        PY_PRINT("Context Layer          : ", batch_size * num_heads * sequence_length * (num_dims / num_heads) * sizeof(__half), " bytes");
+        PY_PRINT("Output Projection      : ", num_dims * num_dims * sizeof(__half), " bytes");
+        PY_PRINT("Output Projection Bias : ", num_dims * sizeof(__half), " bytes");
+        PY_PRINT("Output                 : ", batch_size * sequence_length * num_dims * sizeof(__half), " bytes");
+        PY_PRINT("------------------------");
+    }
 }
 
-void transformer_embed_input_tokens(__half* &ptr, const int *token_ids) {
-  TransformerHeader header_;
-  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
-  
-  // copy token ids to device
-  cudaMemcpy(header_._token_ids, token_ids, sizeof(int) * header_._batch_size * header_._sequence_length, cudaMemcpyHostToDevice);
-
-  // embed token ids to input embedding
-  embedding_input_vector(ptr);
+void transformer_deallocate_device_memory(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return;  
+    } 
+    
+    memory_device_deallocate(transformer->_dvc_base, verbose);
+    memset(transformer, 0, sizeof(Transformer));
+    if (verbose) KERAVNOS_PRINT("transformer deallocated device memory.");
 }
 
-void transformer_generate_qkv_projection(__half* &ptr) {
-  TransformerHeader header_;
-  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
-  
-  const int n_dims_ = header_._num_dims;
-  const int qkv_size_ = n_dims_ * (3 * n_dims_);
-  
-  utils_generate_random_half_dim2(header_._qkv_proj, n_dims_, n_dims_ * 3, -qkv_size_, qkv_size_);
+void transformer_feed_token_ids(Transformer *transformer, const py::array_t<int, py::array::c_style | py::array::forcecast> token_ids, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return;  
+    } 
+    
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    
+    py::buffer_info buf_ = token_ids.request();
+    if (buf_.ndim != 2) {
+        if (verbose) KERAVNOS_PRINT_ERROR("token_ids must be 2D.");
+        return;
+    }
+    if (buf_.shape[0] != header_._batch_size || buf_.shape[1] != header_._sequence_length) {
+        if (verbose) KERAVNOS_PRINT_ERROR("token_ids shape mismatched: expected ", header_._batch_size, " x ", header_._sequence_length);
+        return;
+    }
+
+    std::size_t count_ = buf_.size;
+    int *hst_token_ids_ = static_cast<int *>(buf_.ptr);
+
+    int *dvc_token_ids_ = reinterpret_cast<int *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_token_ids);
+    memory_copy_host_to_device(dvc_token_ids_, hst_token_ids_, count_ * sizeof(int), verbose);
+    
+    if (verbose) KERAVNOS_PRINT("finished feeding token ids into transformer.");
+    
+    embedding_input_vector(transformer, verbose);
+    if (verbose) KERAVNOS_PRINT("transformer input vector embedding completed.");
 }
 
-void transformer_generate_qkv_bias(__half* &ptr) {
-  TransformerHeader header_;
-  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
+void transformer_generate_embedding_weights(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return;  
+    }
 
-  const int bias_dim_ = 3 * header_._num_dims;
-  utils_generate_random_half_dim1(
-    header_._qkv_bias, 
-    bias_dim_, 
-    -bias_dim_, bias_dim_
-  );
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    
+    __half *dvc_token_embed_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_token_embed);
+    __half *dvc_pos_embed_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_pos_embed);
+    __half *dvc_dropout_mask_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_dropout);
+
+    const int base_ = 10000;
+    utils_device_generate_random_half_dim2(dvc_token_embed_, header_._vocab_size, header_._num_dims, -1.0f, 1.0f);
+    utils_device_generate_sinusodial_half(dvc_pos_embed_, header_._sequence_length, header_._num_dims, base_);
+    utils_device_generate_boolean_half(dvc_dropout_mask_, header_._batch_size * header_._num_heads * header_._sequence_length * header_._sequence_length);
 }
 
-void transformer_generate_output_projection(__half* &ptr) {
-  TransformerHeader header_;
-  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
+void transformer_generate_projection_weights(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return;  
+    }
 
-  const int n_dims_ = header_._num_dims;
-  const int out_proj_size_ = n_dims_ * n_dims_;
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_qkv_proj_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_qkv_proj);
+    __half *dvc_out_proj_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_out_proj);
 
-  utils_generate_random_half_dim2(
-    header_._out_proj,
-    n_dims_, n_dims_,
-    -out_proj_size_, out_proj_size_
-  );
+    const std::size_t fan_in_ = header_._num_dims;
+    const std::size_t qkv_fan_out_ = header_._num_dims * 3;
+    const std::size_t output_fan_out_ = header_._num_dims;
+    
+    const float qkv_limit_ = sqrt(6.0f / (fan_in_ + qkv_fan_out_));
+    const float output_limit_ = sqrt(6.0f / (fan_in_ + output_fan_out_));
+    utils_device_generate_random_half_dim2(dvc_qkv_proj_, fan_in_, qkv_fan_out_, -qkv_limit_, qkv_limit_);
+    utils_device_generate_random_half_dim2(dvc_out_proj_, fan_in_, output_fan_out_, -output_limit_, output_limit_);
 }
 
-void transformer_generate_output_bias(__half* &ptr) {
-  TransformerHeader header_;
-  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
+void transformer_generate_bias_weights(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return;  
+    }
 
-  const int n_dims_ = header_._num_dims;
-  utils_generate_random_half_dim1(
-    header_._out_proj_bias,
-    n_dims_,
-    -n_dims_, n_dims_
-  );
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_qkv_proj_bias_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_qkv_proj_bias);
+    __half *dvc_out_proj_bias_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_out_proj_bias);    
+
+    const std::size_t qkv_fan_out_ = header_._num_dims * 3;
+    const std::size_t output_fan_out_ = header_._num_dims;
+    const float limit_ = 0.0f;
+
+    utils_device_generate_random_half_dim1(dvc_qkv_proj_bias_, qkv_fan_out_, -limit_, limit_);
+    utils_device_generate_random_half_dim1(dvc_out_proj_bias_, output_fan_out_, -limit_, limit_);
 }
 
-void transformer_reset_weights(__half* &ptr) {
-  TransformerHeader header_;
-  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
+void transformer_edit_input_embedding(Transformer *transformer, const std::uint16_t *dvc_tensor, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return;  
+    }
 
-  // QKV bias
-  cudaMemset(header_._qkv_bias, 0, 3 * header_._num_dims * sizeof(__half));
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_input_embed_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_input_embed);
 
-  // output weights
-  cudaMemset(
-    header_._output, 
-    0, 
-    header_._batch_size * header_._sequence_length * header_._num_dims * sizeof(__half)
-  );
+    std::size_t num_elems_ = header_._batch_size * header_._sequence_length * header_._num_dims;
+    utils_device_convert<__half, std::uint16_t><<<(num_elems_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_input_embed_, dvc_tensor, num_elems_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
 }
 
-void transformer_causal_self_attention(__half* &ptr, const bool bias, const float dropout, const std::uint64_t seed) {
-  TransformerHeader header_;
-  cudaMemcpy(&header_, ptr, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
-  
-  const int batch_size_ = header_._batch_size;
-  const int seq_len_ = header_._sequence_length;
-  const int n_dims_ = header_._num_dims;
-  const int n_heads_ = header_._num_heads;
-  const int head_dim_ = n_dims_ / n_heads_;
-  const int qkv_stride_ = batch_size_ * seq_len_ * n_dims_;
-  const __half *q_matrix_ = header_._qkv_matrix;
-  const __half *k_matrix_ = q_matrix_ + qkv_stride_;
-  const __half *v_matrix_ = k_matrix_ + qkv_stride_;
+void transformer_edit_qkv_projection(Transformer *transformer, const std::uint16_t *dvc_tensor, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return;  
+    }
 
-  cublasHandle_t handle_;
-  cublasStatus_t stat_ = cublasCreate(&handle_);
-  if (stat_ != CUBLAS_STATUS_SUCCESS) {
-		py::print("\n[keravnos cuda error] Failed to create CUBLAS.");
-		return;
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_qkv_proj_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_qkv_proj);
+    
+    std::size_t num_elems_ = (header_._num_dims * header_._num_dims) * 3;
+    utils_device_convert<__half, std::uint16_t><<<(num_elems_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_qkv_proj_, dvc_tensor, num_elems_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+}
+
+void transformer_edit_output_projection(Transformer *transformer, const std::uint16_t *dvc_tensor, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return;  
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_out_proj_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_out_proj);
+    
+    std::size_t num_elems_ = header_._num_dims * header_._num_dims;
+    utils_device_convert<__half, std::uint16_t><<<(num_elems_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_out_proj_, dvc_tensor, num_elems_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+}
+
+void transformer_edit_qkv_projection_bias(Transformer *transformer, const std::uint16_t *dvc_tensor, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return;  
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_qkv_proj_bias_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_qkv_proj_bias);
+    
+    std::size_t num_elems_ = header_._num_dims * 3;
+    utils_device_convert<__half, std::uint16_t><<<(num_elems_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_qkv_proj_bias_, dvc_tensor, num_elems_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+}
+
+void transformer_edit_output_projection_bias(Transformer *transformer, const std::uint16_t *dvc_tensor, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return;  
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_out_proj_bias_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_out_proj_bias);
+    
+    std::size_t num_elems_ = header_._num_dims;
+    utils_device_convert<__half, std::uint16_t><<<(num_elems_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_out_proj_bias_, dvc_tensor, num_elems_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+}
+
+void transformer_causal_self_attention(Transformer *transformer, const bool bias, const float dropout, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return;  
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_qkv_matrix_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_qkv_matrix);
+    __half *dvc_input_embed_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_input_embed);
+    __half *dvc_qkv_proj_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_qkv_proj);
+    __half *dvc_qkv_proj_bias_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_qkv_proj_bias);
+    __half *dvc_attn_scores_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_attn_scores);
+    __half *dvc_dropout_mask_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_dropout);
+    __half *dvc_context_layer_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_context_layer);
+    __half *dvc_out_proj_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_out_proj);
+    __half *dvc_out_proj_bias_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_out_proj_bias);
+    __half *dvc_output_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_output);
+
+    const int head_dim_ = header_._num_dims / header_._num_heads;
+    const float scale_ = 1.0f / std::sqrt(static_cast<float>(head_dim_));
+    const int qkv_stride_ = header_._batch_size * header_._sequence_length * header_._num_dims;
+    const __half *dvc_q_matrix_ = dvc_qkv_matrix_;
+    const __half *dvc_k_matrix_ = dvc_q_matrix_ + qkv_stride_;
+    const __half *dvc_v_matrix_ = dvc_k_matrix_ + qkv_stride_;
+
+    cublasHandle_t handle_;
+    cublasStatus_t stat_ = cublasCreate(&handle_);
+    if (stat_ != CUBLAS_STATUS_SUCCESS) {
+		if (verbose) KERAVNOS_PRINT_ERROR("failed to create CUBLAS.");
+		throw std::runtime_error("transformer_causal_self_attention failed - failed to create CUBLAS.");
 	}
 
-  // QKV projection
-  selfattn_qkv_projection(
-    header_._qkv_matrix, 
-    handle_, 
-    header_._input_embed, 
-    header_._qkv_proj, header_._qkv_bias,
-    n_dims_, batch_size_, seq_len_, 
-    bias
-  );
+    // perform QKV projection
+    selfattn_compute_qkv_projection(
+        dvc_qkv_matrix_,
+        handle_,
+        dvc_input_embed_, dvc_qkv_proj_, dvc_qkv_proj_bias_,
+        header_._num_dims, header_._batch_size, header_._sequence_length,
+        bias
+    );
 
-  // attention score
-  dim3 grid_attn_(seq_len_, seq_len_, batch_size_ * n_heads_);
-  selfattn_attention_scores<<<grid_attn_, 1>>>(
-    header_._attn_scores,
-    q_matrix_, k_matrix_,
-    seq_len_, n_heads_, head_dim_, sqrtf(static_cast<float>(head_dim_)),
-    true
-  );
+    selfattn_compute_attention(
+        dvc_attn_scores_, dvc_context_layer_,
+        dvc_dropout_mask_, dvc_q_matrix_, dvc_k_matrix_, dvc_v_matrix_,
+        header_._batch_size, header_._sequence_length, header_._num_heads, 
+        head_dim_, 
+        scale_, 
+        true, // causal masking enabled
+        0.0f // dropout
+    );
 
-  // softmax + dropout
-  dim3 grid_softmax_(seq_len_, batch_size_ * n_heads_);
-  selfattn_softmax_dropout<<<grid_softmax_, seq_len_>>>(
-    header_._attn_scores,
-    seq_len_, n_heads_, dropout, seed
-  );
+    // compute output projection
+    selfattn_compute_output_projection(
+        dvc_output_,
+        handle_,
+        dvc_context_layer_, dvc_out_proj_, dvc_out_proj_bias_,
+        header_._batch_size, header_._sequence_length, header_._num_dims, head_dim_, header_._num_heads,
+        bias
+    );
 
-  // weighted sum of values
-  dim3 grid_wv_(seq_len_, batch_size_ * n_heads_);
-  selfattn_attention_weighted_values<<<grid_wv_, head_dim_>>>(
-    header_._context_layer, header_._attn_scores, v_matrix_,
-    seq_len_, n_heads_, head_dim_
-  );
-
-  // final projection
-  selfattn_output_projection(
-    header_._output,
-    handle_,
-    header_._context_layer, header_._out_proj, header_._out_proj_bias,
-    batch_size_, seq_len_, n_dims_, head_dim_, n_heads_,
-    bias
-  );
-
-  stat_ = cublasDestroy(handle_);
-  if (stat_ != CUBLAS_STATUS_SUCCESS) {
-		py::print("\n[keravnos cuda error] Failed to destroy CUBLAS.");
-		return;
+    stat_ = cublasDestroy(handle_);
+    if (stat_ != CUBLAS_STATUS_SUCCESS) {
+		if (verbose) KERAVNOS_PRINT_ERROR("failed to destroy CUBLAS.");
+		throw std::runtime_error("transformer_causal_self_attention failed - failed to destroy CUBLAS.");
 	}
 }
+ 
+TransformerHeader transformer_get_header(Transformer *transformer, const bool verbose) {
+    TransformerHeader hst_header_ = {};    
+    
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return hst_header_;  
+    }
 
+    TransformerHeader *dvc_header_ = reinterpret_cast<TransformerHeader *>(reinterpret_cast<char *>(transformer->_dvc_base));
+    memory_copy_device_to_host(&hst_header_, dvc_header_, sizeof(TransformerHeader), verbose);
+
+    return hst_header_;
+}
+
+py::array_t<int> transformer_get_token_ids(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return {};  
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+
+    py::array_t<int> token_ids_({header_._batch_size, header_._sequence_length});    
+    py::buffer_info buf_ = token_ids_.request();
+    std::size_t count_ = buf_.size;
+    int *hst_ptr_ = static_cast<int *>(buf_.ptr);
+
+    int *dvc_token_ids_ = reinterpret_cast<int *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_token_ids);
+    memory_copy_device_to_host(hst_ptr_, dvc_token_ids_, count_ * sizeof(int), verbose);
+
+    return token_ids_;
+}
+
+py::array_t<float> transformer_get_token_embed(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return {};  
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_token_embed_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_token_embed);
+
+    std::size_t count_ = header_._vocab_size * header_._num_dims;
+    float *dvc_fp32_out_ = static_cast<float *>(memory_device_allocate(count_ * sizeof(float), verbose));
+
+    utils_device_convert<float, __half><<<(count_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_fp32_out_, dvc_token_embed_, count_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+
+    std::vector<float> hst_fp32_out_(count_);
+    memory_copy_device_to_host(hst_fp32_out_.data(), dvc_fp32_out_, count_ * sizeof(float), verbose);
+    
+    memory_device_deallocate(dvc_fp32_out_, verbose);
+    
+    py::array_t<float> result_({header_._vocab_size, header_._num_dims});
+    std::memcpy(result_.mutable_data(), hst_fp32_out_.data(), count_ * sizeof(float));
+    return result_;
+}
+
+py::array_t<float> transformer_get_pos_embed(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return {};  
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_pos_embed_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_pos_embed);
+
+    std::size_t count_ = header_._sequence_length * header_._num_dims;
+    float *dvc_fp32_out_ = static_cast<float *>(memory_device_allocate(count_ * sizeof(float), verbose));
+
+    utils_device_convert<float, __half><<<(count_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_fp32_out_, dvc_pos_embed_, count_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+
+    std::vector<float> hst_fp32_out_(count_);
+    memory_copy_device_to_host(hst_fp32_out_.data(), dvc_fp32_out_, count_ * sizeof(float), verbose);
+    
+    memory_device_deallocate(dvc_fp32_out_, verbose);
+    
+    py::array_t<float> result_({header_._vocab_size, header_._num_dims});
+    std::memcpy(result_.mutable_data(), hst_fp32_out_.data(), count_ * sizeof(float));
+    return result_;
+}
+
+py::array_t<std::uint16_t> transformer_get_input_embedding(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return {};  
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_input_embed_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_input_embed);
+
+    std::size_t count_ = header_._batch_size * header_._sequence_length * header_._num_dims;
+    std::uint16_t *dvc_u16_out_ = static_cast<std::uint16_t *>(memory_device_allocate(count_ * sizeof(std::uint16_t), verbose));
+
+    utils_device_convert<std::uint16_t, __half><<<(count_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_u16_out_, dvc_input_embed_, count_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+
+    std::vector<std::uint16_t> hst_u16_out_(count_);
+    memory_copy_device_to_host(hst_u16_out_.data(), dvc_u16_out_, count_ * sizeof(std::uint16_t), verbose);
+    
+    memory_device_deallocate(dvc_u16_out_, verbose);
+
+    std::vector<std::size_t> shape_ = {header_._batch_size, header_._sequence_length, header_._num_dims};
+    std::vector<std::size_t> strides_ = {
+        static_cast<std::size_t>(header_._sequence_length * header_._num_dims * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(header_._num_dims * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(sizeof(std::uint16_t))
+    };
+
+    py::array_t<std::uint16_t> result_(shape_, strides_);
+    std::memcpy(result_.mutable_data(), hst_u16_out_.data(), count_ * sizeof(std::uint16_t));
+    return result_;
+}
+
+py::array_t<std::uint16_t> transformer_get_qkv_projection(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return {};  
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_qkv_proj_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_qkv_proj);
+
+    std::size_t count_ = (header_._num_dims * header_._num_dims) * 3;
+    std::uint16_t *dvc_u16_out_ = static_cast<std::uint16_t *>(memory_device_allocate(count_ * sizeof(std::uint16_t), verbose));
+
+    utils_device_convert<std::uint16_t, __half><<<(count_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_u16_out_, dvc_qkv_proj_, count_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+
+    std::vector<std::uint16_t> hst_u16_out_(count_);
+    memory_copy_device_to_host(hst_u16_out_.data(), dvc_u16_out_, count_ * sizeof(std::uint16_t), verbose);
+    
+    memory_device_deallocate(dvc_u16_out_, verbose);
+
+    std::vector<std::size_t> shape_ = {3, header_._num_dims, header_._num_dims};
+    std::vector<std::size_t> strides_ = {
+        static_cast<std::size_t>(header_._num_dims * header_._num_dims * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(header_._num_dims * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(sizeof(std::uint16_t))
+    };
+
+    py::array_t<std::uint16_t> result_(shape_, strides_);
+    std::memcpy(result_.mutable_data(), hst_u16_out_.data(), count_ * sizeof(std::uint16_t));
+    return result_;
+}
+
+py::array_t<std::uint16_t> transformer_get_output_projection(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return {};  
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_out_proj_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_out_proj);
+
+    std::size_t count_ = header_._num_dims * header_._num_dims;
+    std::uint16_t *dvc_u16_out_ = static_cast<std::uint16_t *>(memory_device_allocate(count_ * sizeof(std::uint16_t), verbose));
+
+    utils_device_convert<std::uint16_t, __half><<<(count_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_u16_out_, dvc_out_proj_, count_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+
+    std::vector<std::uint16_t> hst_u16_out_(count_);
+    memory_copy_device_to_host(hst_u16_out_.data(), dvc_u16_out_, count_ * sizeof(std::uint16_t), verbose);
+    
+    memory_device_deallocate(dvc_u16_out_, verbose);
+
+    std::vector<std::size_t> shape_ = {header_._num_dims, header_._num_dims};
+    std::vector<std::size_t> strides_ = {
+        static_cast<std::size_t>(header_._num_dims * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(sizeof(std::uint16_t))
+    };
+
+    py::array_t<std::uint16_t> result_(shape_, strides_);
+    std::memcpy(result_.mutable_data(), hst_u16_out_.data(), count_ * sizeof(std::uint16_t));
+    return result_;
+}
+
+py::array_t<std::uint16_t> transformer_get_qkv_projection_bias(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return {};  
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_qkv_proj_bias_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_qkv_proj_bias);
+
+    std::size_t count_ = header_._num_dims * 3;
+    std::uint16_t *dvc_u16_out_ = static_cast<std::uint16_t *>(memory_device_allocate(count_ * sizeof(std::uint16_t), verbose));
+
+    utils_device_convert<std::uint16_t, __half><<<(count_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_u16_out_, dvc_qkv_proj_bias_, count_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+
+    std::vector<std::uint16_t> hst_u16_out_(count_);
+    memory_copy_device_to_host(hst_u16_out_.data(), dvc_u16_out_, count_ * sizeof(std::uint16_t), verbose);
+    
+    memory_device_deallocate(dvc_u16_out_, verbose);
+
+    std::vector<std::size_t> shape_ = {3, header_._num_dims};
+    std::vector<std::size_t> strides_ = {
+        static_cast<std::size_t>(header_._num_dims * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(sizeof(std::uint16_t))
+    };
+
+    py::array_t<std::uint16_t> result_(shape_, strides_);
+
+    std::memcpy(result_.mutable_data(), hst_u16_out_.data(), count_ * sizeof(std::uint16_t));
+    return result_;
+}
+
+py::array_t<std::uint16_t> transformer_get_output_projection_bias(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return {};  
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_out_proj_bias_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_out_proj_bias);
+
+    std::size_t count_ = header_._num_dims;
+    std::uint16_t *dvc_u16_out_ = static_cast<std::uint16_t *>(memory_device_allocate(count_ * sizeof(std::uint16_t), verbose));
+
+    utils_device_convert<std::uint16_t, __half><<<(count_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_u16_out_, dvc_out_proj_bias_, count_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+
+    std::vector<std::uint16_t> hst_u16_out_(count_);
+    memory_copy_device_to_host(hst_u16_out_.data(), dvc_u16_out_, count_ * sizeof(std::uint16_t), verbose);
+    
+    memory_device_deallocate(dvc_u16_out_, verbose);
+
+    std::vector<std::size_t> shape_ = {header_._num_dims};
+    py::array_t<std::uint16_t> result_(shape_);
+    std::memcpy(result_.mutable_data(), hst_u16_out_.data(), count_ * sizeof(std::uint16_t));
+    return result_;
+}
+
+py::array_t<std::uint16_t> transformer_get_output(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return {};
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_output_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_output);
+
+    std::size_t count_ = header_._batch_size * header_._sequence_length * header_._num_dims;
+    std::uint16_t *dvc_u16_out_ = static_cast<std::uint16_t *>(memory_device_allocate(count_ * sizeof(std::uint16_t), verbose));
+    if (verbose) KERAVNOS_PRINT("allocated dvc_u16_out_");
+    
+    utils_device_convert<std::uint16_t, __half><<<(count_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_u16_out_, dvc_output_, count_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+    if (verbose) KERAVNOS_PRINT("done convert.");
+    
+    std::vector<std::uint16_t> hst_u16_out_(count_);
+    if (verbose) KERAVNOS_PRINT("should copy device to host.");
+    memory_copy_device_to_host(hst_u16_out_.data(), dvc_u16_out_, count_ * sizeof(std::uint16_t), verbose);
+    
+    memory_device_deallocate(dvc_u16_out_, verbose);
+
+    std::vector<std::size_t> shape_ = {header_._batch_size, header_._sequence_length, header_._num_dims};
+    std::vector<std::size_t> strides_ = {
+        static_cast<std::size_t>(header_._sequence_length * header_._num_dims * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(header_._num_dims * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(sizeof(std::uint16_t))
+    };
+
+    py::array_t<std::uint16_t> result_(shape_, strides_);
+
+    std::memcpy(result_.mutable_data(), hst_u16_out_.data(), count_ * sizeof(std::uint16_t));
+    return result_;
+}
+
+py::array_t<std::uint16_t> transformer_get_qkv_matrix(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return {};
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_qkv_mat_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_qkv_matrix);
+
+    std::size_t count_ = header_._batch_size * header_._sequence_length * (header_._num_dims * 3);
+    std::uint16_t *dvc_u16_out_ = static_cast<std::uint16_t *>(memory_device_allocate(count_ * sizeof(std::uint16_t), verbose));
+    
+    utils_device_convert<std::uint16_t, __half><<<(count_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_u16_out_, dvc_qkv_mat_, count_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+    
+    std::vector<std::uint16_t> hst_u16_out_(count_);
+    memory_copy_device_to_host(hst_u16_out_.data(), dvc_u16_out_, count_ * sizeof(std::uint16_t), verbose);
+    
+    memory_device_deallocate(dvc_u16_out_, verbose);
+
+    std::vector<std::size_t> shape_ = {header_._batch_size, header_._sequence_length, 3, header_._num_dims};
+    std::vector<std::size_t> strides_ = {
+        static_cast<std::size_t>(header_._sequence_length * 3 * header_._num_dims * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(3 * header_._num_dims * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(header_._num_dims * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(sizeof(std::uint16_t))
+    };
+
+    py::array_t<std::uint16_t> result_(shape_, strides_);
+
+    std::memcpy(result_.mutable_data(), hst_u16_out_.data(), count_ * sizeof(std::uint16_t));
+    return result_;
+}
+
+py::array_t<std::uint16_t> transformer_get_attention_scores(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return {};
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_attn_scores_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_attn_scores);
+
+    std::size_t count_ = header_._batch_size * header_._num_heads * header_._sequence_length * header_._sequence_length;
+    std::uint16_t *dvc_u16_out_ = static_cast<std::uint16_t *>(memory_device_allocate(count_ * sizeof(std::uint16_t), verbose));
+    if (verbose) KERAVNOS_PRINT("allocated dvc_u16_out_");
+    
+    utils_device_convert<std::uint16_t, __half><<<(count_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_u16_out_, dvc_attn_scores_, count_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+    if (verbose) KERAVNOS_PRINT("done convert.");
+    
+    std::vector<std::uint16_t> hst_u16_out_(count_);
+    if (verbose) KERAVNOS_PRINT("should copy device to host.");
+    memory_copy_device_to_host(hst_u16_out_.data(), dvc_u16_out_, count_ * sizeof(std::uint16_t), verbose);
+    
+    memory_device_deallocate(dvc_u16_out_, verbose);
+
+    std::vector<std::size_t> shape_ = {header_._batch_size, header_._num_heads, header_._sequence_length, header_._sequence_length};
+    std::vector<std::size_t> strides_ = {
+        static_cast<std::size_t>(header_._num_heads * header_._sequence_length * header_._sequence_length * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(header_._sequence_length * header_._sequence_length * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(header_._sequence_length * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(sizeof(std::uint16_t))
+    };
+
+    py::array_t<std::uint16_t> result_(shape_, strides_);
+
+    std::memcpy(result_.mutable_data(), hst_u16_out_.data(), count_ * sizeof(std::uint16_t));
+    return result_;
+}
+
+py::array_t<std::uint16_t> transformer_get_context_layer(Transformer *transformer, const bool verbose) {
+    if (!transformer) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer is null.");
+        return {};
+    }
+
+    const TransformerHeader &header_ = transformer_get_header(transformer, verbose);
+    __half *dvc_context_layer_ = reinterpret_cast<__half *>(reinterpret_cast<char *>(transformer->_dvc_base) + header_._offset_context_layer);
+
+    std::size_t head_dim_ = header_._num_dims / header_._num_heads;
+    std::size_t count_ = header_._batch_size * header_._num_heads * header_._sequence_length * head_dim_;
+    std::uint16_t *dvc_u16_out_ = static_cast<std::uint16_t *>(memory_device_allocate(count_ * sizeof(std::uint16_t), verbose));
+    if (verbose) KERAVNOS_PRINT("allocated dvc_u16_out_");
+    
+    utils_device_convert<std::uint16_t, __half><<<(count_ + NUM_THREADS - 1) / NUM_THREADS, NUM_THREADS>>>(dvc_u16_out_, dvc_context_layer_, count_);
+    CUDA_CHECK(cudaDeviceSynchronize(), verbose);
+    if (verbose) KERAVNOS_PRINT("done convert.");
+    
+    std::vector<std::uint16_t> hst_u16_out_(count_);
+    if (verbose) KERAVNOS_PRINT("should copy device to host.");
+    memory_copy_device_to_host(hst_u16_out_.data(), dvc_u16_out_, count_ * sizeof(std::uint16_t), verbose);
+    
+    memory_device_deallocate(dvc_u16_out_, verbose);
+
+    std::vector<std::size_t> shape_ = {header_._batch_size, header_._num_heads, header_._sequence_length, head_dim_};
+    std::vector<std::size_t> strides_ = {
+        static_cast<std::size_t>(header_._num_heads * header_._sequence_length * head_dim_ * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(header_._sequence_length * head_dim_ * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(head_dim_ * sizeof(std::uint16_t)),
+        static_cast<std::size_t>(sizeof(std::uint16_t))
+    };
+
+    py::array_t<std::uint16_t> result_(shape_, strides_);
+
+    std::memcpy(result_.mutable_data(), hst_u16_out_.data(), count_ * sizeof(std::uint16_t));
+    return result_;
+}

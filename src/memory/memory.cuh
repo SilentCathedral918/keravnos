@@ -2,31 +2,13 @@
 
 #include "global.cuh"
 
-template <typename T>
-void memory_allocate(T* &ptr, std::size_t alloc_size) {
-  void *ptr_ = nullptr;
-  cudaError_t err_ = cudaMalloc(&ptr_, alloc_size);
-  
-  if (err_ != cudaSuccess) {
-    py::print("[keravnos cuda error] cudaMalloc() failed:", cudaGetErrorString(err_));
-    ptr = nullptr;
-    return;
-  }
-  
-  ptr = static_cast<T*>(ptr_);
-}
 
-template <typename T>
-void memory_deallocate(T* &ptr) {
-  cudaError_t err_ = cudaFree(ptr);
-  
-  if (err_ != cudaSuccess) {
-    py::print("[keravnos cuda error] cudaFree() failed: ", cudaGetErrorString(err_));
-    return;
-  }
+void *memory_device_allocate(const std::size_t size, const bool verbose);
+void *memory_host_allocate(const std::size_t size, const bool verbose);
 
-  ptr = nullptr;
-}
+void memory_device_deallocate(void *ptr, const bool verbose);
+void memory_host_deallocate(void *ptr, const bool verbose);
 
-std::unordered_map<std::string, std::size_t> memory_get_gpu_vram(void);
-
+void memory_copy_host_to_device(void *dvc_dst, const void *hst_src, const std::size_t size, const bool verbose);
+void memory_copy_device_to_host(void *hst_dst, const void *dvc_src, const std::size_t size, const bool verbose);
+void memory_copy_device_to_device(void *dvc_dst, const void *dvc_src, const std::size_t size, const bool verbose);

@@ -7,5 +7,7 @@
 # Batch files
 *.bat
 
-# Testbed
-/testbed
+# Testbed files
+/testbed/lkeravnos/__pycache__
+/testbed/lkeravnos/lib
+/testbed/lkeravnos/*.pyd

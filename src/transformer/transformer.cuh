@@ -1,60 +1,42 @@
+#pragma once
+
 #include "global.cuh"
 
-typedef struct TransformerHeader {
-  __half*       _token_embed;
-  __half*       _pos_embed;
-  int*          _token_ids;
-  __half*       _input_embed;
-  __half*       _dropout;
-
-  __half*       _qkv_proj;
-  __half*       _qkv_matrix;
-  __half*       _qkv_bias;
-
-  __half*       _attn_scores;
-  __half*       _context_layer;
-  __half*       _out_proj;
-  __half*       _out_proj_bias;
-  __half*       _output;   
-
-  std::uint32_t _batch_size;
-  std::uint32_t _sequence_length;
-  std::uint32_t _vocab_size;
-  std::uint32_t _num_dims;
-  std::uint32_t _num_heads;
-  std::uint32_t _type_bytes;
-
-  bool          _allocated;
-  std::size_t   _mem_total; 
-} TransformerHeader;
-
-void transformer_allocate_memory(
-  __half* &ptr, 
+void transformer_allocate_device_memory(
+  Transformer *transformer,
   const int batch_size, 
   const int sequence_length, 
   const int vocab_size,
   const int num_dims,
-  const int num_heads
+  const int num_heads,
+  const bool verbose
 );
+void transformer_deallocate_device_memory(Transformer *transformer, const bool verbose);
 
-void transformer_deallocate_memory(__half* &ptr);
+void transformer_feed_token_ids(Transformer *transformer, const py::array_t<int, py::array::c_style | py::array::forcecast> token_ids, const bool verbose);
 
-void transformer_generate_embedding_weights(__half* &ptr);
+void transformer_generate_embedding_weights(Transformer *transformer, const bool verbose); 
+void transformer_generate_projection_weights(Transformer *transformer, const bool verbose);
+void transformer_generate_bias_weights(Transformer *transformer, const bool verbose);
 
-void transformer_load_from_file(__half* &out, const char *filepath);
-void transformer_save_to_file(__half* &ptr, const char *filepath);
+void transformer_edit_input_embedding(Transformer *transformer, const std::uint16_t *dvc_tensor, const bool verbose);
+void transformer_edit_qkv_projection(Transformer *transformer, const std::uint16_t *dvc_tensor, const bool verbose);
+void transformer_edit_output_projection(Transformer *transformer, const std::uint16_t *dvc_tensor, const bool verbose);
+void transformer_edit_qkv_projection_bias(Transformer *transformer, const std::uint16_t *dvc_tensor, const bool verbose);
+void transformer_edit_output_projection_bias(Transformer *transformer, const std::uint16_t *dvc_tensor, const bool verbose);
 
-py::array_t<float> transformer_token_embedding(__half* &ptr);
-py::array_t<float> transformer_positional_embedding(__half* &ptr);
+void transformer_causal_self_attention(Transformer *transformer, const bool bias, const float dropout, const bool verbose);
 
-void transformer_embed_input_tokens(__half* &ptr, const int *token_ids);
-
-void transformer_generate_qkv_projection(__half* &ptr);
-void transformer_generate_qkv_bias(__half* &ptr);
-void transformer_generate_output_projection(__half* &ptr);
-void transformer_generate_output_bias(__half* &ptr);
-
-void transformer_reset_weights(__half* &ptr);
-
-void transformer_causal_self_attention(__half* &ptr, const bool bias, const float dropout, const std::uint64_t seed = 0);
-
+TransformerHeader transformer_get_header(Transformer *transformer, const bool verbose);
+py::array_t<int> transformer_get_token_ids(Transformer *transformer, const bool verbose);
+py::array_t<float> transformer_get_token_embed(Transformer *transformer, const bool verbose);
+py::array_t<float> transformer_get_pos_embed(Transformer *transformer, const bool verbose);
+py::array_t<std::uint16_t> transformer_get_input_embedding(Transformer *transformer, const bool verbose);
+py::array_t<std::uint16_t> transformer_get_qkv_projection(Transformer *transformer, const bool verbose);
+py::array_t<std::uint16_t> transformer_get_output_projection(Transformer *transformer, const bool verbose);
+py::array_t<std::uint16_t> transformer_get_qkv_projection_bias(Transformer *transformer, const bool verbose);
+py::array_t<std::uint16_t> transformer_get_output_projection_bias(Transformer *transformer, const bool verbose);
+py::array_t<std::uint16_t> transformer_get_output(Transformer *transformer, const bool verbose);
+py::array_t<std::uint16_t> transformer_get_qkv_matrix(Transformer *transformer, const bool verbose);
+py::array_t<std::uint16_t> transformer_get_attention_scores(Transformer *transformer, const bool verbose);
+py::array_t<std::uint16_t> transformer_get_context_layer(Transformer *transformer, const bool verbose);

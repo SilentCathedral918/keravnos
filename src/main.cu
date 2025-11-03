@@ -1,189 +1,336 @@
+#include "memory/memory.cuh"
+#include "utils/device.cuh"
 #include "transformer/transformer.cuh"
 
-static __half* transformer_weights = nullptr;
+Transformer *current_transformer = nullptr;
+std::unordered_map<std::string, Transformer *> transformer_registry;
 
-void keravnos_activate(int batch_size, int seq_len, int vocab_size, int n_dims, int n_heads, const bool verbose) {
-  if (transformer_weights != nullptr) {
-    if (verbose) py::print("[keravnos error] Transformer is already activated.");
-    return;
-  }
+void keravnos_construct_transformer(
+  const std::string name,
+  const int batch_size, 
+  const int sequence_length, 
+  const int vocab_size,
+  const int num_dims,
+  const int num_heads,
+  const std::uint64_t curand_state_seed,
+  const bool verbose
+) {
+    if (transformer_registry.find(name) != transformer_registry.end()) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer '", name, "' already registered.");
+        return;
+    }
 
-  // allocate memory
-  if (verbose) py::print("[keravnos] Activating transformer...");
-  transformer_allocate_memory(transformer_weights, batch_size, seq_len, vocab_size, n_dims, n_heads);
-  if (transformer_weights == nullptr) {
-    if (verbose) py::print("[keravnos error] Transformer activation failed.");
-    return;
-  }
+    Transformer *tr_ = new Transformer;
+    if (verbose) KERAVNOS_PRINT("transformer '", name, "' constructed.");
+    
+    transformer_allocate_device_memory(tr_, batch_size, sequence_length, vocab_size, num_dims, num_heads, verbose);
+    if (!tr_->_dvc_base) {
+        if (verbose) KERAVNOS_PRINT_ERROR("failed to allocate device memory for transformer '", name, "'.");
+        return;
+    }
+    if (verbose) KERAVNOS_PRINT("completed device memory allocation for transformer '", name, "'.");
 
-  // generate embedding weights
-  transformer_generate_embedding_weights(transformer_weights);
-  if (verbose) py::print("[keravnos] Transformer generated embedding weights.");
-  
-  // generate QKV projection weights
-  transformer_generate_qkv_projection(transformer_weights);
-  if (verbose) py::print("[keravnos] Transformer generated QKV projection weights.");
-  
-  // generate QKV bias weights
-  transformer_generate_qkv_bias(transformer_weights);
-  if (verbose) py::print("[keravnos] Transformer generated QKV bias weights.");
-  
-  // generate output projection
-  transformer_generate_output_projection(transformer_weights);
-  if (verbose) py::print("[keravnos] Transformer generated output projection weights.");
-  
-  // generate output bias
-  transformer_generate_output_bias(transformer_weights);
-  if (verbose) py::print("[keravnos] Transformer generated output bias weights.");
-  
-  // reset weights
-  transformer_reset_weights(transformer_weights);
-  if (verbose) py::print("[keravnos] Transformer reset weights.");
-  
-  if (verbose) py::print("[keravnos] Transformer activation completed.");
+    // generate embedding weights
+    transformer_generate_embedding_weights(tr_, verbose);
+    if (verbose) KERAVNOS_PRINT("transformer '", name, "' generated embedding weights.");
+    
+    // generate projection weights
+    transformer_generate_projection_weights(tr_, verbose);
+    if (verbose) KERAVNOS_PRINT("transformer '", name, "' generated projection weights.");
+    
+    // generate bias weights
+    transformer_generate_bias_weights(tr_, verbose);
+    if (verbose) KERAVNOS_PRINT("transformer '", name, "' generated bias weights.");
+
+    // add to registry
+    transformer_registry[name] = tr_;
+    if (verbose) KERAVNOS_PRINT("transformer '", name, "' added to registry.");
+
+    // set current transformer if null
+    if (!current_transformer) {
+        current_transformer = tr_;
+        if (verbose) KERAVNOS_PRINT("transformer '", name, "' is set as current.");
+    }
 }
 
-void keravnos_activate_from_file(const std::string filepath, const bool verbose) {
-  if (transformer_weights != nullptr) {
-    if (verbose) py::print("[keravnos error] Transformer is already activated.");
-    return;
-  }
+void keravnos_destruct_transformer(const std::string name, const bool verbose) {
+    if (transformer_registry.find(name) == transformer_registry.end()) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer '", name, "' does not exist.");
+        return;
+    }
 
-  // load from file
-  transformer_load_from_file(transformer_weights, filepath.c_str());
-  if (transformer_weights == nullptr) {
-    if (verbose) py::print("[keravnos error] Transformer activation from file failed.");
-    return;
-  }
+    Transformer *tr_ = transformer_registry[name];
 
-  if (verbose) py::print("[keravnos] Transformer activation from file completed.");
+    transformer_deallocate_device_memory(tr_, verbose);
+    if (verbose) KERAVNOS_PRINT("completed device memory deallocation for transformer '", name, "'.");
+
+    if (verbose) KERAVNOS_PRINT("destructed transformer '", name, "'.");
+    transformer_registry.erase(name);
+
+    if (current_transformer == tr_) {
+        if (!transformer_registry.empty()) {
+            current_transformer = transformer_registry.begin()->second;
+            if (verbose) KERAVNOS_PRINT("'", transformer_registry.begin()->first, "' is set as current transformer.");
+        } else {
+            current_transformer = nullptr;
+            if (verbose) KERAVNOS_PRINT("no transformer remaining. current transformer is set to null.");
+        }
+    }
 }
 
-void keravnos_deactivate(const std::string save_filepath, const bool verbose) {
-  if (transformer_weights == nullptr) {
-    if (verbose) py::print("[keravnos error] Transformer is not activated.");
-    return;
-  }
+void keravnos_feed_token_ids(const std::string name, const py::array_t<int, py::array::c_style | py::array::forcecast> token_ids, const bool verbose) {
+    if (transformer_registry.find(name) == transformer_registry.end()) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer '", name, "' does not exist.");
+        return;
+    }
 
-  // save to filepath location had filepath string not being empty
-  if (save_filepath == "") {
-    if (verbose) py::print("[keravnos] save_filepath is empty. Skipping transformer weights savings...");
-  }
-  else {
-    transformer_save_to_file(transformer_weights, save_filepath.c_str());
-  }
-
-  // reset vram utility
-  cudaDeviceReset();
-  transformer_weights = nullptr;
-  if (verbose) py::print("[keravnos] Transformer deactivation completed.");
+    Transformer *tr_ = transformer_registry[name];
+    transformer_feed_token_ids(tr_, token_ids, verbose);
 }
 
-py::array_t<float> keravnos_token_embedding(const bool verbose) {
-  if (transformer_weights == nullptr) {
-    if (verbose) py::print("[keravnos error] Transformer is not activated.");
-    return py::array_t<float>();
-  }
+void keravnos_edit_tensor(const std::string name, const std::string tensor_id, const py::array_t<std::uint16_t> input, const bool verbose) {
+    if (transformer_registry.find(name) == transformer_registry.end()) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer '", name, "' does not exist.");
+        return;
+    }
 
-  return transformer_token_embedding(transformer_weights);
+    Transformer *tr_ = transformer_registry[name];
+
+    py::buffer_info input_info_ = input.request();
+    const std::size_t num_elems_ = input_info_.size;
+    const std::uint16_t* host_data_ = static_cast<std::uint16_t *>(input_info_.ptr);
+
+    std::uint16_t *dvc_input_ = static_cast<std::uint16_t *>(memory_device_allocate(num_elems_ * sizeof(std::uint16_t), verbose));
+    memory_copy_host_to_device(dvc_input_, host_data_, num_elems_ * sizeof(__half), verbose);
+
+    if (tensor_id == "input_embed") {
+        transformer_edit_input_embedding(tr_, dvc_input_, verbose);
+    }
+    else if (tensor_id == "qkv_proj") {
+        transformer_edit_qkv_projection(tr_, dvc_input_, verbose);
+    } 
+    else if (tensor_id == "qkv_proj_bias") {
+        transformer_edit_qkv_projection_bias(tr_, dvc_input_, verbose);
+    }
+    else if (tensor_id == "out_proj") {
+        transformer_edit_output_projection(tr_, dvc_input_, verbose);
+    } 
+    else if (tensor_id == "out_proj_bias") {
+        transformer_edit_output_projection_bias(tr_, dvc_input_, verbose);
+    }
+    else {
+        if (verbose) KERAVNOS_PRINT_WARN("attempted to edit weights for transformer '", name, "' with unknown tensor id: '", tensor_id, "'.");
+    }
+
+    memory_device_deallocate(dvc_input_, verbose);
+    if (verbose) KERAVNOS_PRINT("edit completed for tensor id '", tensor_id, "' of transformer '", name, "'.");
 }
 
-py::array_t<float> keravnos_position_embedding(const bool verbose) {
-  if (transformer_weights == nullptr) {
-    if (verbose) py::print("[keravnos error] Transformer is not activated.");
-    return py::array_t<float>();
-  }
+void keravnos_causal_self_attention(const std::string name, const bool bias, const float dropout, const bool verbose) {
+    if (transformer_registry.find(name) == transformer_registry.end()) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer '", name, "' does not exist.");
+        return;
+    }
 
-  return transformer_positional_embedding(transformer_weights);
+    Transformer *tr_ = transformer_registry[name];
+    transformer_causal_self_attention(tr_, bias, dropout, verbose);
 }
 
-void keravnos_embed_input_token_ids(py::array_t<int> token_ids, const bool verbose) {
-  if (transformer_weights == nullptr) {
-    if (verbose) py::print("[keravnos error] Transformer is not activated.");
-    return;
-  }
+py::dict keravnos_get_transformer_info(const std::string name, const bool verbose) {
+    py::dict info_;
 
-  // force copy to contiguous
-  token_ids = token_ids.attr("copy")();
+    if (transformer_registry.find(name) == transformer_registry.end()) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer '", name, "' does not exist.");
+        return info_;
+    }
+    
+    Transformer *tr_ = transformer_registry[name];
+    const TransformerHeader &header_ = transformer_get_header(tr_, verbose);
 
-  py::buffer_info buf_info_ = token_ids.request();
-  const int *ids_ = reinterpret_cast<int *>(buf_info_.ptr);
-  const std::size_t num_ids_ = buf_info_.size;
+    info_["name"] = name;
+    info_["total_bytes"] = header_._mem_total;
+    info_["batch_size"] = header_._batch_size;
+    info_["sequence_length"] = header_._sequence_length;
+    info_["vocab_size"] = header_._vocab_size;
+    info_["embedding_dim"] = header_._num_dims;
+    info_["num_heads"] = header_._num_heads;
+    info_["header_size"] = sizeof(TransformerHeader);
+    info_["token_embedding_size"] = header_._vocab_size * header_._num_dims * sizeof(__half);
+    info_["positional_embedding_size"] = header_._sequence_length * header_._num_dims * sizeof(__half);
+    info_["token_ids_size"] = header_._batch_size * header_._sequence_length * sizeof(int);
+    info_["input_embedding_size"] = header_._batch_size * header_._sequence_length * header_._num_dims * sizeof(__half);
+    info_["dropout_mask_size"] = header_._batch_size * header_._num_heads * header_._sequence_length * header_._sequence_length * sizeof(__half);
+    info_["qkv_projection_size"] = header_._num_dims * (3 * header_._num_dims) * sizeof(__half);
+    info_["qkv_matrix_size"] = header_._batch_size * header_._sequence_length * (3 * header_._num_dims) * sizeof(__half);
+    info_["qkv_bias_size"] = (3 * header_._num_dims) * sizeof(__half);
+    info_["attention_scores_size"] = header_._batch_size * header_._num_heads * header_._sequence_length * header_._sequence_length * sizeof(__half);
+    info_["context_layer_size"] = header_._batch_size * header_._num_heads * header_._sequence_length * (header_._num_dims / header_._num_heads) * sizeof(__half);
+    info_["output_projection_size"] = header_._num_dims * header_._num_dims * sizeof(__half);
+    info_["output_projection_bias_size"] = header_._num_dims * sizeof(__half);
+    info_["output_size"] = header_._batch_size * header_._sequence_length * header_._num_dims * sizeof(__half);
 
-  TransformerHeader header_;
-  cudaMemcpy(&header_, transformer_weights, sizeof(TransformerHeader), cudaMemcpyDeviceToHost);
+    if (verbose) {
+        KERAVNOS_PRINT("transformer '", name, "' info:");
+        PY_PRINT(info_);
+    }
 
-  if (num_ids_ != header_._batch_size * header_._sequence_length) {
-    if (verbose) py::print("[keravnos error] Expected", header_._batch_size * header_._sequence_length, "token IDs but got", num_ids_, "token IDs instead.");
-    return;
-  }
-
-  transformer_embed_input_tokens(transformer_weights, ids_);
+    return info_;
 }
 
-void keravnos_causal_self_attention(const bool bias, const float dropout, const std::uint64_t seed, const bool verbose) {
-  if (transformer_weights == nullptr) {
-    if (verbose) py::print("[keravnos error] Transformer is not activated.");
-    return;
-  }
+py::array_t<int> keravnos_get_token_ids(const std::string name, const bool verbose) {
+    if (transformer_registry.find(name) == transformer_registry.end()) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer '", name, "' does not exist.");
+        return {};
+    }
 
-  transformer_causal_self_attention(transformer_weights, bias, dropout, seed);
-  if (verbose) py::print("[keravnos] Transformer causal self-attention block completed.");
+    Transformer *tr_ = transformer_registry[name];
+    return transformer_get_token_ids(tr_, verbose);
 }
 
-// ------------------------------ interface ------------------------------ //
+py::array_t<float> keravnos_get_token_embed(const std::string name, const bool verbose) {
+    if (transformer_registry.find(name) == transformer_registry.end()) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer '", name, "' does not exist.");
+        return {};
+    }
+
+    Transformer *tr_ = transformer_registry[name];
+    return transformer_get_token_embed(tr_, verbose);
+}
+
+py::array_t<float> keravnos_get_pos_embed(const std::string name, const bool verbose) {
+    if (transformer_registry.find(name) == transformer_registry.end()) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer '", name, "' does not exist.");
+        return {};
+    }
+
+    Transformer *tr_ = transformer_registry[name];
+    return transformer_get_pos_embed(tr_, verbose);
+}
+
+py::array_t<std::uint16_t> keravnos_get_tensor(const std::string name, const std::string tensor_id, const bool verbose) {
+    if (transformer_registry.find(name) == transformer_registry.end()) {
+        if (verbose) KERAVNOS_PRINT_ERROR("transformer '", name, "' does not exist.");
+        return {};
+    }
+
+    Transformer *tr_ = transformer_registry[name];
+
+    if (tensor_id == "input_embed") {
+        return transformer_get_input_embedding(tr_, verbose);
+    }
+    else if (tensor_id == "qkv_proj") {
+        return transformer_get_qkv_projection(tr_, verbose);
+    } 
+    else if (tensor_id == "qkv_proj_bias") {
+        return transformer_get_qkv_projection_bias(tr_, verbose);
+    }
+    else if (tensor_id == "out_proj") {
+        return transformer_get_output_projection(tr_, verbose);
+    } 
+    else if (tensor_id == "out_proj_bias") {
+        return transformer_get_output_projection_bias(tr_, verbose);
+    }
+    else if (tensor_id == "output") {
+        return transformer_get_output(tr_, verbose);
+    }
+    else if (tensor_id == "qkv_matrix") {
+        return transformer_get_qkv_matrix(tr_, verbose);
+    } 
+    else if (tensor_id == "attention_scores") {
+        return transformer_get_attention_scores(tr_, verbose);
+    }
+    else if (tensor_id == "context_layer") {
+        return transformer_get_context_layer(tr_, verbose);
+    }
+    else {
+        if (verbose) KERAVNOS_PRINT_WARN("attempted to retrieve tensor for transformer '", name, "' with unknown tensor id: '", tensor_id, "'.");
+        return {};
+    }
+}
+
+// -------------------------------- interface -------------------------------- //
 
 PYBIND11_MODULE(keravnos, m) {
-  m.def(
-    "activate",
-    &keravnos_activate,
-    py::arg("batch_size") = 2,
-    py::arg("sequence_length") = 2048,
-    py::arg("vocab_size") = 48000,
-    py::arg("num_dims") = 768,
-    py::arg("num_heads") = 12,
-    py::arg("verbose") = false
-  );
-
-  m.def(
-    "activate_from_file",
-    &keravnos_activate_from_file,
-    py::arg("filepath") = "",
-    py::arg("verbose") = false
-  );
-
-  m.def(
-    "deactivate",
-    &keravnos_deactivate,
-    py::arg("save_filepath") = "",
-    py::arg("verbose") = false
-  );
-
-  m.def(
-    "get_token_embedding",
-    &keravnos_token_embedding,
-    py::arg("verbose") = false
-  );
+    m.def(
+        "construct",
+        &keravnos_construct_transformer,
+        py::arg("name"),
+        py::arg("batch_size") = 2,
+        py::arg("sequence_length") = 2048,
+        py::arg("vocab_size") = 48000,
+        py::arg("num_dims") = 768,
+        py::arg("num_heads") = 12,
+        py::arg("curand_state_seed") = 0,
+        py::arg("verbose") = false
+    );
   
-  m.def(
-    "get_positional_embedding",
-    &keravnos_position_embedding,
-    py::arg("verbose") = false
-  );
+    m.def(
+        "destruct",
+        &keravnos_destruct_transformer,
+        py::arg("name"),
+        py::arg("verbose") = false
+    );
 
-  m.def(
-    "embed_input_token_ids",
-    &keravnos_embed_input_token_ids,
-    py::arg("token_ids"),
-    py::arg("verbose") = false
-  );
+    m.def(
+        "feed_token_ids",
+        &keravnos_feed_token_ids,
+        py::arg("name"),
+        py::arg("token_ids"),
+        py::arg("verbose") = false
+    );
 
-  m.def(
-    "causal_self_attention",
-    &keravnos_causal_self_attention,
-    py::arg("bias") = true,
-    py::arg("dropout") = 0.5f,
-    py::arg("seed") = 0,
-    py::arg("verbose") = false
-  );
+    m.def(
+        "edit_tensor",
+        &keravnos_edit_tensor,
+        py::arg("name"),
+        py::arg("tensor_id"),
+        py::arg("input"),
+        py::arg("verbose") = false
+    );
+
+    m.def(
+        "causal_self_attention",
+        &keravnos_causal_self_attention,
+        py::arg("name"),
+        py::arg("use_bias") = true,
+        py::arg("dropout") = 0.5f,
+        py::arg("verbose") = false
+    );
+
+    m.def(
+        "get_info",
+        &keravnos_get_transformer_info,
+        py::arg("name"),
+        py::arg("verbose") = false
+    );
+
+    m.def(
+        "get_token_ids",
+        &keravnos_get_token_ids,
+        py::arg("name"),
+        py::arg("verbose") = false
+    );
+
+    m.def(
+        "get_token_embed",
+        &keravnos_get_token_embed,
+        py::arg("name"),
+        py::arg("verbose") = false
+    );
+
+    m.def(
+        "get_pos_embed",
+        &keravnos_get_pos_embed,
+        py::arg("name"),
+        py::arg("verbose") = false
+    );
+
+    m.def(
+        "get_tensor",
+        &keravnos_get_tensor,
+        py::arg("name"),
+        py::arg("tensor_id"),
+        py::arg("verbose") = false
+    );
 }
+ 
